@@ -1,6 +1,7 @@
 library(tidyverse)
 library(dotenv)
 library(simstudy)
+library(charlatan)
 
 
 load_dot_env()
@@ -351,7 +352,9 @@ synth_inspections_static_df <- synth_inspections_df %>%
     }
   ) %>%
   ungroup() %>%
-  select(-status_levels, -status_probs)
+  select(-status_levels, -status_probs) %>%
+  left_join(occupancies_df %>% select(occupancy_id, occupancy_type, size_class), by = "occupancy_id") %>%
+  distinct()
 
 
 ### With Device Year Probs
@@ -386,104 +389,14 @@ synth_inspections_year_df <- synth_inspections_df %>%
     }
   ) %>%
   ungroup() %>%
-  select(-status_levels, -status_probs)
+  select(-status_levels, -status_probs) %>%
+  left_join(occupancies_df %>% select(occupancy_id, occupancy_type, size_class), by = "occupancy_id") %>%
+  distinct()
 
+charlatan::ch_company()
 
-
-
-
-
-
-
-
-### old
-
-p_to_formula <- function(p) paste(sprintf("%.12f", p), collapse = ";")
-
-set.seed(343)
-
-# adding application
-
-applications <- application_prob_df$application_name
-p_app <- application_prob_df$event_prob
-
-def <- defData(varname = "application_idx",
-               dist = "categorical",
-               formula = p_to_formula(p_app),
-               id = "device_inspection_id")
-
-synth_df <- genData(500000, def) %>%
-  mutate(application_name = applications[application_idx]) %>%
-  select(-application_idx)
-
-
-# adding device
-
-dev_lookup <- device_app_prob_df %>%
-  group_by(application_name) %>%
-  summarise(
-    device_levels = list(device),
-    device_probs  = list(event_prob),
-    .groups = "drop"
-  )
-
-synth_df <- synth_df %>%
-  left_join(dev_lookup, by = "application_name") %>%
-  rowwise() %>%
-  mutate(
-    device = sample(device_levels, size = 1, prob = device_probs)
-  ) %>%
-  ungroup() %>%
-  select(-device_levels, -device_probs)
-
-
-# Adding device status
-
-status_lookup <- device_status_rate_df %>%
-  group_by(device) %>%
-  summarise(
-    status_levels = list(device_status),
-    status_probs  = list(status_rate),
-    .groups = "drop"
-  )
-
-global_status <- device_status_rate_df %>%
-  group_by(device_status) %>%
-  summarise(total = sum(total_count, na.rm = TRUE), .groups = "drop") %>%
-  mutate(p = total / sum(total))
-
-global_status_levels <- global_status$device_status
-global_status_probs  <- global_status$p
-
-synth_df <- synth_df %>%
-  left_join(status_lookup, by = "device") %>%
-  rowwise() %>%
-  mutate(
-    device_status = if (!is.null(status_levels) && length(status_levels) > 0) {
-      sample(status_levels, size = 1, prob = status_probs)
-    } else {
-      sample(global_status_levels, size = 1, prob = global_status_probs)
-    }
-  ) %>%
-  ungroup() %>%
-  select(-status_levels, -status_probs)
-
-
-### Testing
- 
-synthetic <- synth_df %>%
-  count(application_name, device) %>%
-  group_by(application_name) %>%
-  mutate(p = n / sum(n)) %>%
-  ungroup()
-
-real <- device_app_prob_df %>%
-  select(application_name, device, p = event_prob)
-
-comparison <- synthetic %>%
-  inner_join(real, by = c("application_name","device"), suffix = c("_syn","_real")) %>%
-  mutate(diff = p_syn / p_real)
-
-
-
+### Next steps: add inspection time based on device type distribution
+### population density correlated random lat/long for occupancies to showcase map based analytics
+### Verify the probabilities for device statuses and device inspection times follow a trend to showcase temporal trends
+### Add inspection companies (custom AI generated names could be interesting as well)
 
