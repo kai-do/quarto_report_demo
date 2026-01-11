@@ -3,6 +3,7 @@ library(dotenv)
 library(simstudy)
 library(charlatan)
 
+random_lat_long_df <- readRDS('datasets/random_lat_long_2022.rds')
 
 load_dot_env()
 
@@ -75,14 +76,14 @@ app_device_count_df <- device_app_per_inspection_df %>%
 device_inspection_time_df <- inspection_device_failures_reasons_raw_df %>%
   filter(!is.na(device), device != "",
          !is.na(total_seconds_to_test), total_seconds_to_test > 0) %>%
-  distinct(device, total_seconds_to_test) %>%
-  group_by(device) %>%
-  summarise(
-    avg_inspection_time_sec = mean(total_seconds_to_test, na.rm = TRUE),
-    sd_inspection_time_sec  = sd(total_seconds_to_test, na.rm = TRUE),
-    .groups = "drop"
+  group_by(device, year) %>%
+  summarise(max_inspection_time_secs = max(total_seconds_to_test, na.rm = TRUE),
+            total_tested = sum(tested, na.rm = TRUE)) %>%
+  mutate(
+    avg_inspection_time_sec = max_inspection_time_secs / total_tested
   ) %>%
-  arrange(device)
+  select(device, year, avg_inspection_time_sec)
+  
 
 device_status_rate_df <- inspection_device_status_df %>%
   filter(!is.na(device), device != "") %>%
@@ -133,7 +134,7 @@ occupancy_types <- c(
 set.seed(343)
 
 # --- knobs ---
-n_occupancies <- 2000
+n_occupancies <- 10000
 
 # occupancy type probabilities (simple: uniform; replace later if you want)
 p_occ <- rep(1/length(occupancy_types), length(occupancy_types))
@@ -202,15 +203,25 @@ random_first_inspection_date <- function(n, k, year = 2026) {
   )
 }
 
+companies_df <- tibble(
+  inspection_company = replicate(1000, charlatan::ch_company()),
+  weight = rlnorm(1000, meanlog = 0, sdlog = 1)
+) %>%
+  mutate(prob = weight / sum(weight))
+
 years <- 2026:2030
 # --- generate base occupancy rows ---
 occupancies_df <- genData(n_occupancies, def_occ) %>%
-  mutate(
+  mutate(inspection_company = sample(
+    companies_df$inspection_company,
+    size = n(),
+    replace = TRUE,
+    prob = companies_df$prob),
     occupancy_type = occupancy_types[occupancy_type_idx],
     size_class     = size_levels[size_idx],
     n_apps         = napp_levels[n_apps_idx]
   ) %>%
-  select(occupancy_id, occupancy_type, size_class, n_apps) %>%
+  select(occupancy_id, occupancy_type, size_class, n_apps, inspection_company) %>%
   rowwise() %>%
   mutate(
     inspections_per_year = sample(
@@ -226,16 +237,13 @@ occupancies_df <- genData(n_occupancies, def_occ) %>%
         replace = FALSE,
         prob    = p_app
       )
-    ),
-      #base_device_n = unname(size_base[size_class]),
-      #device_n = pmax(
-      #  1L,
-      #  round(base_device_n * (1 + runif(n(), -size_jitter_frac, size_jitter_frac))))
+    )
   ) %>%
   ungroup() %>%
   crossing(year = years) %>%
   rowwise() %>%
-  mutate(first_inspection_date = random_first_inspection_date(1, inspections_per_year, year))
+  mutate(first_inspection_date = random_first_inspection_date(1, inspections_per_year, year)) %>%
+  left_join(random_lat_long_df %>% mutate(occupancy_id = row_number()), by = "occupancy_id")
 
 
 
@@ -341,7 +349,7 @@ global_status_levels <- global_status$device_status
 global_status_probs  <- global_status$p
 
 
-synth_inspections_static_df <- synth_inspections_df %>%
+synth_inspections_status_df <- synth_inspections_df %>%
   left_join(status_lookup, by = "device") %>%
   rowwise() %>%
   mutate(
@@ -393,7 +401,40 @@ synth_inspections_year_df <- synth_inspections_df %>%
   left_join(occupancies_df %>% select(occupancy_id, occupancy_type, size_class), by = "occupancy_id") %>%
   distinct()
 
-charlatan::ch_company()
+
+time_lookup_year <- device_inspection_time_df %>%
+  mutate(year = year + 6) %>%
+  group_by(device, year) %>%
+  summarise(
+    avg_inspection_time_sec = mean(pmax(avg_inspection_time_sec, 1), na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+global_time_year <- device_inspection_time_df %>%
+  summarise(
+    mu = mean(avg_inspection_time_sec, na.rm = TRUE)
+  )
+
+# Helper: positive normal draw (no negatives)
+rposnorm <- function(n, mean, sd, min_val = 1) {
+  x <- rnorm(n, mean = mean, sd = sd)
+  pmax(min_val, x)
+}
+
+synth_device_events_year_df <- synth_inspections_year_df %>%
+  left_join(time_lookup_year, by = c("device", "year")) %>%
+  left_join(global_time_year, by = "device") %>%
+  mutate(
+    avg_inspection_time_sec = if_else(is.na(avg_inspection_time_sec), mu, avg_inspection_time_sec),
+    device_test_time_sec    = rposnorm(n(), avg_inspection_time_sec, sd = 10, min_val = 1)
+  ) %>%
+  select(-avg_inspection_time_sec)
+
+saveRDS(synth_device_events_year_df, file = "datasets/synthetic_device_inspections_2026_2030.rds")
+saveRDS(occupancies_df, file = "datasets/synthetic_occupancies_2026_2030.rds")
+
+#charlatan::ch_company()
 
 ### Next steps: add inspection time based on device type distribution
 ### population density correlated random lat/long for occupancies to showcase map based analytics

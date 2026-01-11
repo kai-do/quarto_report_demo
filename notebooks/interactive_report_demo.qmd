@@ -1,6 +1,6 @@
 ---
-title: "Interactive Report Demo"
-author: "Kaido Analytics LLC"
+title: "Atlas Compliance Inspection Group"
+author: "BuildingReports.com"
 format:
   html:
     code-fold: false
@@ -18,23 +18,327 @@ theme:
 
 ---
 
-## Quarto
+```{r setup, include=FALSE}
 
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+library(tidyverse)
+library(charlatan)
 
-## Running Code
+dev_insp_df <- readRDS("../datasets/synthetic_device_inspections_2026_2030.rds") %>%
+  select(occupancy_id, inspection_id, inspection_date, application_name, device_id, device, device_inspection_id, device_status, device_test_time_sec)
 
-When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+occ_df <- readRDS("../datasets/synthetic_occupancies_2026_2030.rds") %>%
+  distinct(occupancy_id, occupancy_type, size_class, inspection_company, longitude, latitude) %>%
+  mutate(inspection_company = case_when(
+    inspection_company == "Gleason Ltd" ~ "Atlas Compliance Inspection Group",
+    TRUE ~ inspection_company
+  ))
 
-```{r}
-1 + 1
+
+atlas_dev_insp_df <- dev_insp_df %>%
+  left_join(occ_df, by = "occupancy_id") %>%
+  filter(inspection_company == "Atlas Compliance Inspection Group")
+
+atlas_occ_df <- occ_df %>%
+  filter(inspection_company == "Atlas Compliance Inspection Group")
+
+
 ```
 
-You can add options to executable code like this 
 
-```{r}
-#| echo: false
-2 * 2
+```{r occupancy-stats}
+
+occupancy_stats_df <- dev_insp_df %>%
+  left_join(occ_df, by = "occupancy_id") %>%
+  group_by(occupancy_id, inspection_company, occupancy_type, latitude, longitude) %>%
+  summarise(
+    total_inspections = n_distinct(inspection_id),
+    total_devices = n_distinct(device_id),
+    total_device_inspections = n(),
+    pass_rate = mean(device_status == "Passed") * 100,
+    median_device_inspection_time_sec = median(device_test_time_sec, na.rm = TRUE),
+    avg_inspection_time_sec = sum(device_test_time_sec, na.rm = TRUE) / n_distinct(inspection_id),
+    first_inspection_date = min(inspection_date),
+    last_inspection_date = max(inspection_date)
+    ) %>%
+  mutate(occupancy_name = charlatan::ch_company(locale = "en_US"),
+         address = AddressProvider_en_US$new()$street_address())
+
+atlas_occupancy_stats_df <- occupancy_stats_df %>%
+  filter(inspection_company == "Atlas Compliance Inspection Group")
+
 ```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+
+```{r occupancy-map}
+
+library(dplyr)
+library(scales)
+library(leaflet)
+library(htmltools)
+
+
+# 1) Prep + color palette (pass_rate looks like 0–100 in your screenshot)
+map_df <- atlas_occupancy_stats_df %>%
+  filter(!is.na(latitude), !is.na(longitude), !is.na(pass_rate)) %>%
+  mutate(
+    pass_rate = as.numeric(pass_rate),
+    pass_rate_clamped = pmin(pmax(pass_rate, 0), 100)
+  )
+
+pal <- colorNumeric(
+  palette = "RdYlGn",    # red (low) -> green (high)
+  domain  = c(0, 100),
+  reverse = FALSE
+)
+
+
+# 2) Popup content (FIXED: placeholders match fields; no stray lat/lon; correct ordering)
+library(dplyr)
+library(purrr)
+library(htmltools)
+library(scales)
+
+
+
+
+atlas_occ_map <- leaflet(map_df) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(
+    lng = ~longitude, lat = ~latitude,
+    radius = 6,
+    stroke = TRUE, weight = 1, opacity = 1,
+    fillOpacity = 0.85,
+    color = ~pal(pass_rate_clamped),
+    fillColor = ~pal(pass_rate_clamped),
+
+    popup = ~sprintf(
+      "<div style='font-size: 13px;'>
+         <div style='font-size: 15px; font-weight: 700;'>%s</div>
+         <div style='margin-bottom: 6px; color: #555;'>%s</div>
+         <table style='width: 100%%;'>
+           <tr><td><b>Company</b></td><td>%s</td></tr>
+           <tr><td><b>Type</b></td><td>%s</td></tr>
+           <tr><td><b>First Inspection date</b></td><td>%s</td></tr>
+           <tr><td><b>Last Inspection date</b></td><td>%s</td></tr>
+           <tr><td><b>Total Inspections</b></td><td>%s</td></tr>
+           <tr><td><b>Total Devices</b></td><td>%s</td></tr>
+           <tr><td><b>Average Inspection Time</b></td><td>%s sec</td></tr>
+           <tr><td><b>Pass Rate</b></td><td>%s%%</td></tr>
+           <tr><td><b>Total Device Inspections</b></td><td>%s</td></tr>
+           <tr><td><b>Median Device Test Time</b></td><td>%s sec</td></tr>
+         </table>
+       </div>",
+      htmltools::htmlEscape(occupancy_name),
+      htmltools::htmlEscape(address),
+      htmltools::htmlEscape(inspection_company),
+      htmltools::htmlEscape(occupancy_type),
+      htmltools::htmlEscape(as.character(first_inspection_date)),
+      htmltools::htmlEscape(as.character(last_inspection_date)),
+      formatC(total_inspections, big.mark = ",", digits = 0),
+      formatC(total_devices, big.mark = ",", digits = 0),
+      round(avg_inspection_time_sec, 1),
+      round(pass_rate, 1),
+      formatC(total_device_inspections, big.mark = ",", digits = 0),
+      round(median_device_inspection_time_sec, 1)
+    ),
+
+    label = ~paste0(occupancy_name, " — ", round(pass_rate, 1), "%"),
+    labelOptions = labelOptions(direction = "auto")
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal,
+    values = ~pass_rate_clamped,
+    title = "Inspection Time (secs)",
+    opacity = 1
+  )
+
+
+```
+
+
+```{r}
+
+# Color/legend/label now driven by avg_inspection_time_sec (not pass_rate)
+
+# make sure your palette is defined for inspection time (secs)
+# Palette now based on MINUTES
+pal_insp_time <- colorNumeric(
+  palette = "Blues",
+  domain  = range(map_df$avg_inspection_time_sec / 60, na.rm = TRUE)
+)
+
+atlas_occ_insp_time_map <- leaflet(map_df) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(
+    lng = ~longitude, lat = ~latitude,
+    radius = 6,
+    stroke = TRUE, weight = 1, opacity = 1,
+    fillOpacity = 0.85,
+    color = ~(pal_insp_time(avg_inspection_time_sec / 60)),
+    fillColor = ~(pal_insp_time(avg_inspection_time_sec / 60)),
+
+    popup = ~sprintf(
+      "<div style='font-size: 13px;'>
+         <div style='font-size: 15px; font-weight: 700;'>%s</div>
+         <div style='margin-bottom: 6px; color: #555;'>%s</div>
+         <table style='width: 100%%;'>
+           <tr><td><b>Company</b></td><td>%s</td></tr>
+           <tr><td><b>Type</b></td><td>%s</td></tr>
+           <tr><td><b>First Inspection date</b></td><td>%s</td></tr>
+           <tr><td><b>Last Inspection date</b></td><td>%s</td></tr>
+           <tr><td><b>Total Inspections</b></td><td>%s</td></tr>
+           <tr><td><b>Total Devices</b></td><td>%s</td></tr>
+           <tr><td><b>Average Inspection Time</b></td><td>%s min</td></tr>
+           <tr><td><b>Pass Rate</b></td><td>%s%%</td></tr>
+           <tr><td><b>Total Device Inspections</b></td><td>%s</td></tr>
+           <tr><td><b>Median Device Test Time</b></td><td>%s sec</td></tr>
+         </table>
+       </div>",
+      htmltools::htmlEscape(occupancy_name),
+      htmltools::htmlEscape(address),
+      htmltools::htmlEscape(inspection_company),
+      htmltools::htmlEscape(occupancy_type),
+      htmltools::htmlEscape(as.character(first_inspection_date)),
+      htmltools::htmlEscape(as.character(last_inspection_date)),
+      formatC(total_inspections, big.mark = ",", digits = 0),
+      formatC(total_devices, big.mark = ",", digits = 0),
+      round(avg_inspection_time_sec / 60, 2),
+      round(pass_rate, 1),
+      formatC(total_device_inspections, big.mark = ",", digits = 0),
+      round(median_device_inspection_time_sec, 1)
+    ),
+
+    label = ~paste0(
+      occupancy_name, " — ",
+      round(avg_inspection_time_sec / 60, 2), " min"
+    ),
+    labelOptions = labelOptions(direction = "auto")
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal_insp_time,
+    values = ~(avg_inspection_time_sec / 60),
+    title = "Average Inspection Time (minutes)",
+    opacity = 1
+  )
+
+
+```
+
+
+```{r}
+
+inspection_stats_df <- dev_insp_df %>%
+  group_by(inspection_id, inspection_date, occupancy_id) %>%
+  summarise(
+    total_devices = n_distinct(device_id),
+    passed_devices = sum(device_status == "Passed"),
+    failed_devices = sum(device_status != "Passed"),
+    median_device_test_time_sec = median(device_test_time_sec, na.rm = TRUE),
+    total_inspection_time_sec = sum(device_test_time_sec, na.rm = TRUE),
+    pass_rate = passed_devices / total_devices * 100
+  )
+
+company_stats_df <- dev_insp_df %>%
+  left_join(occ_df, by = "occupancy_id") %>%
+  group_by(inspection_company) %>%
+  summarise(
+    total_inspections = n_distinct(inspection_id),
+    total_devices_inspected = n_distinct(device_id),
+    avg_devices_per_inspection = total_devices_inspected / total_inspections,
+    pass_rate = mean(device_status == "Passed") * 100,
+    median_device_test_time_sec = median(device_test_time_sec, na.rm = TRUE)
+  ) %>%
+  arrange(desc(total_inspections))
+
+
+
+atlas_inspection_stats_df <- inspection_stats_df %>%
+  left_join(occ_df, by = "occupancy_id") %>%
+  filter(inspection_company == "Atlas Compliance Inspection Group")
+
+```
+
+::: {.panel-tabset}
+
+## Overview
+
+`r min()`
+
+::: {.columns}
+
+::: {.column width="25%"}
+::: {.value-box}
+Total Inspections  
+**128,402**
+:::
+:::
+
+::: {.column width="25%"}
+::: {.value-box}
+Pass Rate  
+**96.4%**
+:::
+:::
+
+::: {.column width="25%"}
+::: {.value-box}
+Median Inspection Time  
+**14.2 sec**
+:::
+:::
+
+::: {.column width="25%"}
+::: {.value-box}
+Market Percentile  
+**72nd**
+:::
+:::
+
+:::
+
+::: {.card}
+### Inspection Efficiency
+
+Median inspection time for **Atlas Compliance Group** is lower than the
+market median across most device categories.
+
+*(Hover charts below to explore by device and occupancy.)*
+:::
+
+
+## Benchmarking
+Content for benchmarking tab (company vs market comparisons).
+
+::: {.columns}
+
+::: {.column width="60%"}
+::: {.card}
+### Inspection Volume Over Time
+*(interactive chart goes here)*
+:::
+:::
+
+::: {.column width="40%"}
+::: {.card}
+### Key Takeaways
+- Volume steadily increasing
+- No evidence of seasonal slowdown
+- Growth driven by commercial occupancies
+:::
+:::
+
+:::
+
+
+## Quality & Risk
+Content for pass/fail/maintenance, anomalies.
+
+## Geography
+`r atlas_occ_insp_time_map`
+
+
+:::
+
+
